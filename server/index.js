@@ -36,6 +36,41 @@ const authenticateToken = (req, res, next) => {
   });
 };
 
+// Current user verification endpoint
+app.get('/api/auth/me', authenticateToken, async (req, res) => {
+  try {
+    // Since the authenticateToken middleware already verified the token
+    // and attached the user ID to the request, we just need to fetch
+    // the user's details from the database
+    
+    const { data: user, error } = await supabase
+      .from('users')
+      .select('*')
+      .eq('id', req.user.id)
+      .single();
+    
+    if (error) {
+      console.error('Error fetching user data:', error);
+      return res.status(500).json({ message: 'Error fetching user data' });
+    }
+    
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    
+    // Remove password from response
+    const { password: _, ...userWithoutPassword } = user;
+    
+    res.json(userWithoutPassword);
+  } catch (error) {
+    console.error('User verification error:', error);
+    res.status(500).json({ 
+      message: 'Server error during user verification', 
+      error: error.message 
+    });
+  }
+});
+
 // Admin middleware
 const isAdmin = (req, res, next) => {
   if (req.user.role !== 'admin') {
@@ -45,7 +80,6 @@ const isAdmin = (req, res, next) => {
   next();
 };
 
-// Auth routes
 app.post('/api/auth/register', async (req, res) => {
   try {
     console.log('=== Registration Attempt ===');
@@ -67,14 +101,8 @@ app.post('/api/auth/register', async (req, res) => {
       });
     }
     
-    // Check for Supabase connection
-    if (!supabase) {
-      console.error('Supabase client not initialized');
-      return res.status(500).json({ message: 'Database connection error' });
-    }
-    
     try {
-      // Comprehensive user existence check
+      // Check if user already exists
       const { data: existingUsers, error: queryError } = await supabase
         .from('users')
         .select('*')
@@ -89,20 +117,14 @@ app.post('/api/auth/register', async (req, res) => {
         console.error('Existing User Query Error:', queryError);
         return res.status(500).json({ 
           message: 'Error checking user existence', 
-          error: queryError.message,
-          details: queryError
+          error: queryError.message
         });
       }
       
       if (existingUsers && existingUsers.length > 0) {
         console.log('Duplicate User Found:', existingUsers);
         return res.status(400).json({ 
-          message: 'User with this email or phone already exists',
-          details: existingUsers.map(u => ({
-            id: u.id,
-            email: u.email,
-            phone: u.phone
-          }))
+          message: 'User with this email or phone already exists'
         });
       }
       
@@ -110,97 +132,73 @@ app.post('/api/auth/register', async (req, res) => {
       const salt = await bcrypt.genSalt(10);
       const hashedPassword = await bcrypt.hash(password, salt);
       
-      // Prepare user data
-      const newUser = {
-        name, 
-        email, 
-        phone, 
-        password: hashedPassword,
-        role: 'user' // Default role
-      };
-      console.log('New User Data:', newUser);
-      
-      console.log('Attempting to insert user:', {
-        ...newUser,
-        password: '[REDACTED]'
-      });
-      
-      // Insert user with detailed error handling
+      // Insert the new user
       const { data: createdUser, error: insertError } = await supabase
         .from('users')
-        .insert([newUser])
+        .insert([{
+          name, 
+          email, 
+          phone, 
+          password: hashedPassword,
+          role: 'user'
+        }])
         .select();
       
-      console.log('User Insertion Result:', {
-        createdUser,
-        insertError
-      });
-      
       if (insertError) {
-        console.error('Detailed Insertion Error:', {
-          message: insertError.message,
-          details: insertError,
-          code: insertError.code
-        });
-        
+        console.error('User Insertion Error:', insertError);
         return res.status(500).json({ 
-          message: 'Failed to create user in database',
-          error: insertError.message,
-          code: insertError.code,
-          details: insertError
+          message: 'Failed to create user',
+          error: insertError.message
         });
       }
       
       if (!createdUser || createdUser.length === 0) {
-        console.error('No user data returned after insert');
-        return res.status(500).json({ 
-          message: 'User created but no data returned',
-          details: 'Unexpected database behavior'
-        });
+        return res.status(500).json({ message: 'User creation failed' });
       }
       
-      const userRecord = createdUser[0];
+      const user = createdUser[0];
       
-      // Create token
+      // Create JWT token
       const token = jwt.sign(
-        { id: userRecord.id, role: userRecord.role },
+        { id: user.id, role: user.role },
         process.env.JWT_SECRET,
         { expiresIn: '7d' }
       );
       
       // Remove password from response
-      const { password: _, ...userWithoutPassword } = userRecord;
+      const { password: _, ...userWithoutPassword } = user;
       
-      console.log('Registration Successful:', {
-        userId: userRecord.id,
-        email: userRecord.email
+      console.log('Registration successful:', {
+        userId: user.id,
+        email: user.email
       });
       
+      // Return user data and token
       res.status(201).json({
         user: userWithoutPassword,
         token
       });
-    } catch (dbError) {
-      console.error('Comprehensive Database Error:', dbError);
+    } catch (error) {
+      console.error('Registration error:', error);
       res.status(500).json({ 
-        message: 'Unexpected database error',
-        error: dbError.message,
-        details: dbError
+        message: 'Server error during registration', 
+        error: error.message
       });
     }
   } catch (error) {
-    console.error('Registration Unexpected Error:', error);
+    console.error('Unexpected registration error:', error);
     res.status(500).json({ 
-      message: 'Unexpected server error during registration', 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      message: 'Unexpected server error', 
+      error: error.message
     });
   }
 });
 
 app.post('/api/auth/login', async (req, res) => {
   try {
-    console.log('Login attempt:', req.body);
+    console.log('=== Login Attempt ===');
+    console.log('Request Body:', JSON.stringify(req.body, null, 2));
+    
     const { phone, password } = req.body;
     
     if (!phone || !password) {
@@ -218,12 +216,12 @@ app.post('/api/auth/login', async (req, res) => {
     console.log('Query results:', { 
       found: users?.length > 0, 
       count: users?.length, 
-      error: queryError 
+      error: queryError ? queryError.message : null
     });
     
     if (queryError) {
       console.error('Error finding user:', queryError);
-      return res.status(500).json({ message: 'Error finding user', error: queryError });
+      return res.status(500).json({ message: 'Error finding user' });
     }
     
     if (!users || users.length === 0) {
@@ -232,13 +230,7 @@ app.post('/api/auth/login', async (req, res) => {
     }
     
     const user = users[0];
-    console.log('Found user:', { 
-      id: user.id, 
-      name: user.name, 
-      role: user.role, 
-      phone: user.phone,
-      passwordExists: !!user.password 
-    });
+    console.log('Found user ID:', user.id);
     
     // Check password
     console.log('Comparing passwords');
@@ -266,41 +258,43 @@ app.post('/api/auth/login', async (req, res) => {
     // Remove password from response
     const { password: _, ...userWithoutPassword } = user;
     
-    console.log('Login successful for user:', user.name, 'with role:', user.role);
+    console.log('Login successful for user:', user.name);
     res.json({
       user: userWithoutPassword,
       token
     });
   } catch (error) {
-    console.error('Login error details:', error);
+    console.error('Login error:', error);
     res.status(500).json({ 
       message: 'Server error during login', 
-      error: error.message,
-      stack: process.env.NODE_ENV === 'development' ? error.stack : undefined
+      error: error.message
     });
   }
-});
+}); 
 
 // Product routes
+// Products endpoint
 app.get('/api/products', async (req, res) => {
   try {
-    console.log('Fetching products...');
+    console.log('==== Fetching products... ====');
+    
     const { data, error } = await supabase
       .from('products')
       .select('*')
       .order('name');
     
-    console.log('Products response:', { data: data?.length || 0, error });
+    console.log('Raw products data:', data);
+    console.log('Products error:', error);
     
     if (error) {
       console.error('Error fetching products:', error);
-      throw error;
+      return res.status(500).json({ message: 'Error fetching products', error: error.message });
     }
     
     console.log(`Returning ${data?.length || 0} products`);
-    res.json(data);
+    res.json(data || []);
   } catch (error) {
-    console.error('Error fetching products:', error);
+    console.error('Unexpected error in products endpoint:', error);
     res.status(500).json({ message: 'Server error fetching products' });
   }
 });

@@ -9,12 +9,8 @@ export default defineConfig({
       '/api': {
         target: 'http://localhost:5000',
         changeOrigin: true,
-        secure: false,
-        // Add error handling
-        onError: (err, req, res) => {
-          console.error('Proxy error:', err);
-        }
+        secure: false
       }
     }
   }
-})
+});

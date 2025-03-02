@@ -1,5 +1,4 @@
 import React, { createContext, useState, useEffect, useContext } from 'react'
-import { supabase } from '../utils/supabaseClient'
 
 const AuthContext = createContext()
 
@@ -12,167 +11,145 @@ export function AuthProvider({ children }) {
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
-    // Check for existing session
-    const checkUser = async () => {
+    // Check for existing token on component mount
+    const checkUserAuthentication = async () => {
+      const token = localStorage.getItem('token')
+      if (!token) {
+        setLoading(false)
+        return
+      }
+
       try {
-        const { data: { session } } = await supabase.auth.getSession()
-        
-        if (session) {
-          // Fetch additional user details
-          const { data: userData, error: userError } = await supabase
-            .from('users')
-            .select('*')
-            .eq('email', session.user.email)
-            .single()
-
-          if (userData) {
-            setUser({
-              ...userData,
-              email: session.user.email
-            })
+        // Use token to get current user data
+        const response = await fetch('/api/auth/me', {
+          headers: {
+            'Authorization': `Bearer ${token}`
           }
+        })
+
+        if (!response.ok) {
+          throw new Error('Failed to authenticate token')
         }
-        
-        setLoading(false)
+
+        const userData = await response.json()
+        setUser(userData)
       } catch (error) {
-        console.error('Session check error:', error)
+        console.error('Authentication check failed:', error)
+        // Clear invalid token
+        localStorage.removeItem('token')
+      } finally {
         setLoading(false)
       }
     }
 
-    checkUser()
-
-    // Listen to auth changes
-    const { data: authListener } = supabase.auth.onAuthStateChange(
-      async (event, session) => {
-        if (event === 'SIGNED_IN') {
-          // Fetch user details when signed in
-          const { data: userData, error } = await supabase
-            .from('users')
-            .select('*')
-            .eq('email', session.user.email)
-            .single()
-
-          if (userData) {
-            setUser({
-              ...userData,
-              email: session.user.email
-            })
-          }
-        } else if (event === 'SIGNED_OUT') {
-          setUser(null)
-        }
-      }
-    )
-
-    return () => {
-      authListener.subscription.unsubscribe()
-    }
+    checkUserAuthentication()
   }, [])
 
   const login = async (phone, password) => {
     try {
-      // First, find the user by phone
-      const { data: users, error: userError } = await supabase
-        .from('users')
-        .select('*')
-        .eq('phone', phone)
-        .single()
-
-      if (userError || !users) {
-        throw new Error('User not found')
+      console.log('Attempting login with phone:', phone)
+      
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({ phone, password })
+      })
+      
+      // Log entire response for debugging
+      console.log('Login response status:', response.status)
+      
+      const data = await response.json()
+      console.log('Login response data:', data)
+      
+      if (!response.ok) {
+        throw new Error(data.message || 'Login failed')
       }
-
-      // Use email for Supabase auth
-      const { data, error } = await supabase.auth.signInWithPassword({
-        email: users.email,
-        password: password
-      })
-
-      if (error) throw error
-
-      // Set user data
-      setUser({
-        ...users,
-        email: data.user.email
-      })
-
-      return users
+      
+      // Store token in localStorage
+      localStorage.setItem('token', data.token)
+      
+      // Set user data in state
+      setUser(data.user)
+      
+      return data.user
     } catch (error) {
-      console.error('Login error:', error)
+      console.error('Login error details:', error)
       throw error
     }
   }
 
   const register = async (name, email, phone, password) => {
     try {
-      // First, check if user already exists
-      const { data: existingUsers, error: checkError } = await supabase
-        .from('users')
-        .select('*')
-        .or(`email.eq.${email},phone.eq.${phone}`)
-
-      if (checkError) throw checkError
-      if (existingUsers && existingUsers.length > 0) {
-        throw new Error('User with this email or phone already exists')
-      }
-
-      // Sign up with Supabase Auth
-      const { data: authData, error: authError } = await supabase.auth.signUp({
-        email: email,
-        password: password,
-        options: {
-          data: {
-            name: name,
-            phone: phone,
-            role: 'user'
-          }
-        }
-      })
-
-      if (authError) throw authError
-
-      // Insert additional user details into users table
-      const { data: userData, error: userError } = await supabase
-        .from('users')
-        .insert([{
+      console.log('Registering new user:', { name, email, phone })
+      
+      const response = await fetch('/api/auth/register', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
           name,
           email,
           phone,
-          role: 'user'
-        }])
-        .select()
-
-      if (userError) throw userError
-
-      // Set user data
-      setUser({
-        ...userData[0],
-        email: authData.user.email
+          password
+        })
       })
-
-      return userData[0]
+      
+      // Log response details for debugging
+      console.log('Registration response status:', response.status)
+      
+      const responseText = await response.text()
+      console.log('Raw response text:', responseText)
+      
+      let data
+      try {
+        data = JSON.parse(responseText)
+      } catch (parseError) {
+        console.error('Failed to parse response:', parseError)
+        throw new Error(`Server returned invalid JSON: ${responseText}`)
+      }
+      
+      if (!response.ok) {
+        throw new Error(data.message || 'Registration failed')
+      }
+      
+      // Store token in localStorage
+      localStorage.setItem('token', data.token)
+      
+      // Set user data in state
+      setUser(data.user)
+      
+      return data.user
     } catch (error) {
-      console.error('Registration error:', error)
+      console.error('Registration error details:', error)
       throw error
     }
   }
 
   const logout = async () => {
     try {
-      await supabase.auth.signOut()
+      // Remove token from localStorage
+      localStorage.removeItem('token')
+      
+      // Clear user state
       setUser(null)
+      
+      console.log('User logged out successfully')
     } catch (error) {
       console.error('Logout error:', error)
     }
   }
 
+  // Creates value object with authentication state and methods
   const value = {
     user,
     login,
     register,
     logout,
     isAdmin: user?.role === 'admin',
+    loading
   }
 
   return (
