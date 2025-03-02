@@ -118,6 +118,7 @@ app.post('/api/auth/register', async (req, res) => {
         password: hashedPassword,
         role: 'user' // Default role
       };
+      console.log('New User Data:', newUser);
       
       console.log('Attempting to insert user:', {
         ...newUser,
